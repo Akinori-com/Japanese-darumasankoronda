@@ -44,6 +44,7 @@ shared_state = {
     "presenting_index": 0,      # 0, 1, 2 (1もんめ〜3もんめ)
     "show_answer": False,       # なまえをオープンしたか
     "is_mimicking": False,      # まねっこ中かどうか
+    "version": 1,
     "updated_at": 0
 }
 
@@ -103,6 +104,15 @@ class ManekkoHandler(http.server.SimpleHTTPRequestHandler):
 
         return super().do_GET()
 
+    def do_HEAD(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ('/api/state', '/api/info'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            return
+        return super().do_HEAD()
+
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         content_length = int(self.headers.get('Content-Length', 0))
@@ -115,6 +125,7 @@ class ManekkoHandler(http.server.SimpleHTTPRequestHandler):
                 for key in data:
                     if key in shared_state:
                         shared_state[key] = data[key]
+                shared_state["version"] = shared_state.get("version", 0) + 1
                 import time
                 shared_state["updated_at"] = int(time.time() * 1000)
 

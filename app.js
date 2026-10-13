@@ -1,6 +1,13 @@
 /**
- * まねっこあそび アプリ - クライアントスクリプト
+ * まねっこあそび アプリ - クライアントスクリプト (最新安定版)
  * 知的障害特別支援学校小学部 国語科
+ * 
+ * 【特徴】
+ * ・MQTT over WebSocket によるクラウドリアルタイム同期（学校のファイアウォールを完全回避）
+ * ・ローカルサーバー同期 / BroadcastChannel / オフライン1台モードの多重フェイルセーフ設計
+ * ・1枚からでも送信可能（授業の進度に応じた柔軟性）
+ * ・送信完了待機画面の明確化（児童が不安にならないUI）
+ * ・先生用「おたすけ操作（強制進行・サンプルデータ投入）」機能
  */
 
 // ==================== 1. アプリ状態定義 ====================
@@ -19,20 +26,33 @@ let appState = {
   presenting_index: 0,
   show_answer: false,
   is_mimicking: false,
+  version: 1,               // 同期用バージョンカウンター
   updated_at: 0
 };
 
-// 自分の端末の設定
+// 端末固有の設定
 let myRole = null;          // "team_a" | "team_b" | "teacher"
 let soundEnabled = true;
-let isServerAvailable = false;
-let serverPollInterval = null;
 let currentNamingTab = 0;
+let roomId = "manekko_default"; // クラウド同期のあいことば
 
-// おたすけことばリスト（特別支援学校小学部で親しみやすい動きの言葉）
+// 通信関連
+let mqttClient = null;
+let isMqttConnected = false;
+let isLocalServerAvailable = false;
+let bc = null;
+
+// おたすけことばリスト
 const HELPER_WORDS = [
   "じゃんぷ", "あるく", "はしる", "くるくる", "ロボット",
   "ねこ", "うさぎ", "とり", "おどる", "たいそう", "ねる", "てをふる"
+];
+
+// サンプルイラスト（先生おたすけ用：SVGをDataURL化）
+const SAMPLE_POSES = [
+  "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 220' width='300' height='220'><rect width='300' height='220' fill='%23fed7aa'/><circle cx='150' cy='80' r='45' fill='%23ea580c'/><text x='150' y='95' font-size='40' text-anchor='middle'>🐰</text><path d='M110,130 Q150,110 190,130 L180,190 L120,190 Z' fill='%23f97316'/><text x='150' y='170' font-size='20' font-weight='bold' fill='white' text-anchor='middle'>ぴょんぴょん</text></svg>",
+  "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 220' width='300' height='220'><rect width='300' height='220' fill='%23bae6fd'/><circle cx='150' cy='80' r='45' fill='%230284c7'/><text x='150' y='95' font-size='40' text-anchor='middle'>🤖</text><path d='M100,130 L200,130 L190,190 L110,190 Z' fill='%230ea5e9'/><text x='150' y='170' font-size='20' font-weight='bold' fill='white' text-anchor='middle'>がしゃんがしゃん</text></svg>",
+  "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 220' width='300' height='220'><rect width='300' height='220' fill='%23bbf7d0'/><circle cx='150' cy='80' r='45' fill='%2316a34a'/><text x='150' y='95' font-size='40' text-anchor='middle'>🐱</text><path d='M120,130 Q150,115 180,130 L170,190 L130,190 Z' fill='%2322c55e'/><text x='150' y='170' font-size='20' font-weight='bold' fill='white' text-anchor='middle'>にゃーのポーズ</text></svg>"
 ];
 
 // ==================== 2. Web Audio API サウンドシステム ====================
@@ -52,11 +72,9 @@ function playSound(type) {
   if (!soundEnabled) return;
   const ctx = getAudioContext();
   if (!ctx) return;
-
   const now = ctx.currentTime;
 
   if (type === 'click') {
-    // 軽いポコン音
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
@@ -69,7 +87,6 @@ function playSound(type) {
     osc.start(now);
     osc.stop(now + 0.08);
   } else if (type === 'shutter') {
-    // カシャッ（ホワイトノイズ＋減衰）
     const bufferSize = ctx.sampleRate * 0.1;
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const data = buffer.getChannelData(0);
@@ -83,7 +100,6 @@ function playSound(type) {
     gain.connect(ctx.destination);
     noise.start(now);
   } else if (type === 'success') {
-    // ピンポーン♪
     [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -97,7 +113,6 @@ function playSound(type) {
       osc.stop(now + i * 0.1 + 0.3);
     });
   } else if (type === 'reveal') {
-    // ドラムロール後のジャジャーン！
     [440, 554.37, 659.25, 880].forEach(freq => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -111,7 +126,6 @@ function playSound(type) {
       osc.stop(now + 0.8);
     });
   } else if (type === 'count') {
-    // ピッ
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
@@ -123,7 +137,6 @@ function playSound(type) {
     osc.start(now);
     osc.stop(now + 0.1);
   } else if (type === 'start') {
-    // ポーン！（開始音）
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
@@ -137,61 +150,98 @@ function playSound(type) {
   }
 }
 
-// 音声読み上げ（SpeechSynthesis）
+// 音声読み上げ
 function speak(text) {
   if (!soundEnabled || !('speechSynthesis' in window)) return;
   try {
     window.speechSynthesis.cancel();
     const uttr = new SpeechSynthesisUtterance(text);
     uttr.lang = 'ja-JP';
-    uttr.rate = 0.9; // 少しゆっくり・はっきり
-    uttr.pitch = 1.1; // 明るい声
+    uttr.rate = 0.9;
+    uttr.pitch = 1.1;
     window.speechSynthesis.speak(uttr);
   } catch (e) {
-    console.warn("Speech synthesis error", e);
+    console.warn("Speech error", e);
   }
 }
 
-// ==================== 3. 状態同期・通信システム ====================
+// ==================== 3. クラウドMQTT ＆ 多重同期システム ====================
 
-// サーバー通信チェック＆ポーリング開始
-async function initSync() {
+// ルームのトピック名取得
+function getMqttTopic() {
+  return `manekko/app_state/${roomId}`;
+}
+
+// MQTT接続（WSS経由・ファイアウォール完全回避）
+function initMqtt() {
+  const statusEl = document.getElementById('sync-status');
+  const statusText = document.getElementById('sync-status-text');
+
+  // ブローカーリスト（HiveMQのパブリックWSSポート8884）
+  const brokerUrl = "wss://broker.hivemq.com:8884/mqtt";
+  const clientId = "manekko_" + Math.random().toString(16).substring(2, 10);
+
   try {
-    const res = await fetch('/api/info', { cache: 'no-store' });
-    if (res.ok) {
-      const info = await res.json();
-      isServerAvailable = true;
-      document.getElementById('sync-status-text').textContent = "つうしんOK";
-      
-      // QRコードURLの更新
-      const qrUrl = info.url;
-      document.getElementById('qr-url-text').textContent = qrUrl;
-      generateQrCode(qrUrl);
+    statusText.textContent = "クラウド接続中...";
+    mqttClient = mqtt.connect(brokerUrl, {
+      clientId: clientId,
+      clean: true,
+      connectTimeout: 5000,
+      reconnectPeriod: 3000
+    });
 
-      // 初回状態取得
-      await pullState();
-      // 定期ポーリング開始（1.5秒おき）
-      serverPollInterval = setInterval(pullState, 1500);
-      return;
-    }
+    mqttClient.on('connect', () => {
+      isMqttConnected = true;
+      statusEl.className = "flex items-center gap-1 bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-full text-xs font-black border border-emerald-300 shadow-sm";
+      statusText.textContent = "クラウド同期中 🟢";
+      console.log("MQTT connected to", brokerUrl);
+
+      // トピック購読
+      const topic = getMqttTopic();
+      mqttClient.subscribe(topic, (err) => {
+        if (!err) {
+          console.log("Subscribed to", topic);
+          // 接続時に現状をリクエストするか、最初の状態をブロードキャスト
+          publishState(false);
+        }
+      });
+    });
+
+    mqttClient.on('message', (topic, message) => {
+      try {
+        const payload = JSON.parse(message.toString());
+        if (payload && payload.senderId !== clientId) {
+          console.log("MQTT message received:", payload.state.current_step);
+          applyRemoteState(payload.state);
+        }
+      } catch (err) {
+        console.warn("MQTT parse error", err);
+      }
+    });
+
+    mqttClient.on('error', (err) => {
+      console.warn("MQTT error", err);
+      statusEl.className = "flex items-center gap-1 bg-amber-100 text-amber-800 px-2.5 py-1 rounded-full text-xs font-black border border-amber-300 shadow-sm";
+      statusText.textContent = "ローカル同期";
+    });
+
+    mqttClient.on('offline', () => {
+      isMqttConnected = false;
+      statusText.textContent = "オフライン";
+    });
+
   } catch (e) {
-    console.log("ローカルPythonサーバー未検出。ブラウザ単体/BroadcastChannelで動作します。");
+    console.warn("MQTT init error", e);
   }
-
-  // サーバー未検出時：BroadcastChannel（同一端末内別タブでの同期）
-  initBroadcastChannel();
-  document.getElementById('sync-status-text').textContent = "スタンドアロン";
-  generateQrCode(window.location.href);
-  document.getElementById('qr-url-text').textContent = window.location.href;
 }
 
-let bc = null;
+// BroadcastChannel (同一ブラウザ別タブ同期)
 function initBroadcastChannel() {
   try {
-    bc = new BroadcastChannel('manekko_channel');
+    bc = new BroadcastChannel('manekko_channel_' + roomId);
     bc.onmessage = (event) => {
       if (event.data && event.data.type === 'STATE_UPDATE') {
-        applyState(event.data.state, false);
+        applyRemoteState(event.data.state);
       }
     };
   } catch (e) {
@@ -199,69 +249,97 @@ function initBroadcastChannel() {
   }
 }
 
-async function pullState() {
-  if (!isServerAvailable) return;
+// ローカルPythonサーバーチェック
+async function checkLocalServer() {
   try {
-    const res = await fetch('/api/state', { cache: 'no-store' });
+    const res = await fetch('/api/info', { cache: 'no-store' });
     if (res.ok) {
-      const remoteState = await res.json();
-      if (remoteState.updated_at > appState.updated_at) {
-        applyState(remoteState, false);
-      }
+      isLocalServerAvailable = true;
+      console.log("Local Python server is active.");
+      // 2秒ごとにポーリング
+      setInterval(async () => {
+        try {
+          const sRes = await fetch('/api/state', { cache: 'no-store' });
+          if (sRes.ok) {
+            const remoteState = await sRes.json();
+            if (remoteState.version > appState.version || remoteState.updated_at > appState.updated_at) {
+              applyRemoteState(remoteState);
+            }
+          }
+        } catch (e) {}
+      }, 2000);
     }
   } catch (e) {
-    console.warn("State pull failed", e);
+    isLocalServerAvailable = false;
   }
 }
 
-async function pushState(newState) {
-  appState = { ...appState, ...newState, updated_at: Date.now() };
-  renderUI();
+// 状態の配信 (MQTT + LocalServer + BroadcastChannel + LocalStorage)
+function publishState(incrementVersion = true) {
+  if (incrementVersion) {
+    appState.version = (appState.version || 0) + 1;
+    appState.updated_at = Date.now();
+  }
 
-  if (isServerAvailable) {
+  // LocalStorageに保存（オフライン復旧用）
+  try {
+    localStorage.setItem('manekko_saved_state', JSON.stringify(appState));
+  } catch (e) {}
+
+  // 1. MQTTで配信
+  if (mqttClient && isMqttConnected) {
     try {
-      await fetch('/api/state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(appState)
+      const topic = getMqttTopic();
+      const payload = JSON.stringify({
+        senderId: mqttClient.options.clientId,
+        state: appState
       });
+      mqttClient.publish(topic, payload, { qos: 0, retain: false });
     } catch (e) {
-      console.warn("State push failed", e);
+      console.warn("MQTT publish failed", e);
     }
-  } else if (bc) {
+  }
+
+  // 2. BroadcastChannelで配信
+  if (bc) {
     bc.postMessage({ type: 'STATE_UPDATE', state: appState });
   }
+
+  // 3. ローカルサーバーへPOST
+  if (isLocalServerAvailable) {
+    fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(appState)
+    }).catch(() => {});
+  }
 }
 
-function applyState(newState, shouldPush = false) {
+// リモートからの状態適用
+function applyRemoteState(remoteState) {
   const prevStep = appState.current_step;
   const prevAnswer = appState.show_answer;
   const prevMimic = appState.is_mimicking;
 
-  appState = { ...newState };
+  appState = { ...remoteState };
   renderUI();
 
-  // 音声や演出のトリガー
-  if (prevStep !== 'naming' && appState.current_step === 'naming') {
+  // イベント音・音声読み上げトリガー
+  if (prevStep === 'shooting' && appState.current_step === 'naming') {
     playSound('success');
     speak("写真が届きました！名前をつけてね！");
-  }
-  if (!prevAnswer && appState.show_answer) {
+  } else if (!prevAnswer && appState.show_answer) {
     playSound('reveal');
     const q = appState.questions[appState.presenting_index];
     if (q && q.name) speak(`名前は、${q.name} です！`);
-  }
-  if (!prevMimic && appState.is_mimicking) {
+  } else if (!prevMimic && appState.is_mimicking) {
     triggerMimicAnimation();
-  }
-
-  if (shouldPush) {
-    pushState(appState);
   }
 }
 
 // ==================== 4. 画像圧縮ユーティリティ ====================
-function compressImage(file, maxWidth = 800, quality = 0.7) {
+// iPadでの通信を極限まで軽くするため、長辺640px・品質0.6に最適化
+function compressImage(file, maxWidth = 640, quality = 0.6) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -295,6 +373,10 @@ function renderUI() {
   const roundEl = document.getElementById('round-display');
   if (roundEl) roundEl.textContent = appState.round;
 
+  // あいことば表示
+  const roomEl = document.getElementById('room-display');
+  if (roomEl) roomEl.textContent = `あいことば: ${roomId.replace('manekko_', '')}`;
+
   // チームカードの役割テキスト更新
   const isTeamAShooter = appState.team_roles.team_a === 'shooter';
   document.getElementById('team-a-icon').textContent = isTeamAShooter ? '📷' : '✏️';
@@ -302,6 +384,9 @@ function renderUI() {
 
   document.getElementById('team-b-icon').textContent = !isTeamAShooter ? '📷' : '✏️';
   document.getElementById('team-b-role-text').textContent = !isTeamAShooter ? 'ポーズを さつえい するよ！' : 'なまえを つけるよ！';
+
+  // 進行バーのハイライト更新
+  updateProgressBar();
 
   // 画面の切り替え
   const viewTop = document.getElementById('view-top');
@@ -312,7 +397,6 @@ function renderUI() {
   const roleBadge = document.getElementById('current-role-badge');
   const roleBadgeText = document.getElementById('role-badge-text');
 
-  // 全画面非表示にしてから該当を表示
   [viewTop, viewShoot, viewName, viewPresent].forEach(v => v.classList.add('hidden'));
 
   if (!myRole) {
@@ -325,19 +409,19 @@ function renderUI() {
   btnBack.classList.remove('hidden');
   roleBadge.classList.remove('hidden');
 
-  // ロールバッジの色と文字設定
+  // ロールバッジ設定
   if (myRole === 'team_a') {
-    roleBadge.className = "flex items-center gap-1.5 px-3 py-1 rounded-full text-sm md:text-base font-black shadow-sm bg-rose-100 text-rose-700 border border-rose-300";
+    roleBadge.className = "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs md:text-sm font-black shadow-sm bg-rose-100 text-rose-700 border border-rose-300";
     roleBadgeText.textContent = `あかチーム (${appState.team_roles.team_a === 'shooter' ? '📷 さつえい' : '✏️ なまえつけ'})`;
   } else if (myRole === 'team_b') {
-    roleBadge.className = "flex items-center gap-1.5 px-3 py-1 rounded-full text-sm md:text-base font-black shadow-sm bg-sky-100 text-sky-700 border border-sky-300";
+    roleBadge.className = "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs md:text-sm font-black shadow-sm bg-sky-100 text-sky-700 border border-sky-300";
     roleBadgeText.textContent = `あおチーム (${appState.team_roles.team_b === 'shooter' ? '📷 さつえい' : '✏️ なまえつけ'})`;
   } else {
-    roleBadge.className = "flex items-center gap-1.5 px-3 py-1 rounded-full text-sm md:text-base font-black shadow-sm bg-amber-100 text-amber-800 border border-amber-300";
+    roleBadge.className = "flex items-center gap-1.5 px-3 py-1 rounded-full text-xs md:text-sm font-black shadow-sm bg-amber-100 text-amber-800 border border-amber-300";
     roleBadgeText.textContent = "📺 せんせい・モニター";
   }
 
-  // 自分の役割に応じた画面表示
+  // 役割に応じた画面表示
   if (myRole === 'teacher') {
     viewPresent.classList.remove('hidden');
     renderPresentView();
@@ -354,7 +438,7 @@ function renderUI() {
         renderShootView();
       }
     } else {
-      // Namer 側
+      // なまえつけ側
       if (appState.current_step === 'presenting') {
         viewPresent.classList.remove('hidden');
         renderPresentView();
@@ -365,12 +449,48 @@ function renderUI() {
     }
   }
 
-  // Lucideアイコンの再描画
   if (window.lucide) lucide.createIcons();
+}
+
+// 授業進行ステータスバーの更新
+function updateProgressBar() {
+  const indShoot = document.getElementById('step-indicator-shoot');
+  const indName = document.getElementById('step-indicator-name');
+  const indPresent = document.getElementById('step-indicator-present');
+
+  // リセット
+  [indShoot, indName, indPresent].forEach(el => {
+    el.className = "flex items-center gap-1 text-slate-400 font-bold transition-all";
+    el.querySelector('span:first-child').className = "w-5 h-5 rounded-full bg-slate-300 text-white flex items-center justify-center text-xs";
+  });
+
+  if (appState.current_step === 'shooting') {
+    indShoot.className = "flex items-center gap-1 text-rose-600 font-black scale-105 transition-all";
+    indShoot.querySelector('span:first-child').className = "w-5 h-5 rounded-full bg-rose-500 text-white flex items-center justify-center text-xs shadow-sm";
+  } else if (appState.current_step === 'naming') {
+    indName.className = "flex items-center gap-1 text-sky-600 font-black scale-105 transition-all";
+    indName.querySelector('span:first-child').className = "w-5 h-5 rounded-full bg-sky-500 text-white flex items-center justify-center text-xs shadow-sm";
+  } else if (appState.current_step === 'presenting') {
+    indPresent.className = "flex items-center gap-1 text-amber-600 font-black scale-105 transition-all";
+    indPresent.querySelector('span:first-child').className = "w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs shadow-sm";
+  }
 }
 
 // 撮影画面のレンダリング
 function renderShootView() {
+  const sentBox = document.getElementById('shoot-sent-box');
+  const activeBox = document.getElementById('shoot-active-box');
+
+  // すでに送信済み（current_step === 'naming'）の場合、待機ボックスを表示
+  if (appState.current_step === 'naming') {
+    sentBox.classList.remove('hidden');
+    activeBox.classList.add('hidden');
+    return;
+  }
+
+  sentBox.classList.add('hidden');
+  activeBox.classList.remove('hidden');
+
   let photoCount = 0;
   appState.questions.forEach((q, idx) => {
     const slot = idx + 1;
@@ -396,43 +516,76 @@ function renderShootView() {
 
   const submitBtn = document.getElementById('btn-submit-photos');
   const submitText = document.getElementById('btn-submit-photos-text');
-  if (photoCount === 3) {
+  
+  // 1枚以上撮れば送信可能に改善！
+  if (photoCount >= 1) {
     submitBtn.disabled = false;
     submitBtn.className = "w-full bg-gradient-to-r from-emerald-400 to-green-500 hover:from-emerald-500 hover:to-green-600 active:scale-98 text-white font-black text-xl md:text-2xl py-4 rounded-2xl shadow-xl border-2 border-emerald-300 flex items-center justify-center gap-3 cursor-pointer animate-bounce-slow";
-    submitText.textContent = "3まい できた！ あいてにおくる 🚀";
+    submitText.textContent = `${photoCount}まい できた！ あおチームにおくる 🚀`;
   } else {
     submitBtn.disabled = true;
     submitBtn.className = "w-full bg-slate-300 text-slate-500 font-black text-xl md:text-2xl py-4 rounded-2xl shadow-lg border-2 border-slate-300 flex items-center justify-center gap-3 cursor-not-allowed";
-    submitText.textContent = `あと ${3 - photoCount}まい とると おくれるよ！`;
+    submitText.textContent = "しゃしんを 1まい いじょう とろう！";
   }
 }
 
 // なまえつけ画面のレンダリング
 function renderNameView() {
   const waitingEl = document.getElementById('name-waiting');
+  const sentBox = document.getElementById('name-sent-box');
   const activeEl = document.getElementById('name-active');
 
-  // まだ撮影中かどうか判定
-  const hasPhotos = appState.questions.every(q => q.image !== null);
+  // 写真が1枚もない場合、または撮影中の場合
+  const hasPhotos = appState.questions.some(q => q.image !== null);
   if (!hasPhotos && appState.current_step === 'shooting') {
     waitingEl.classList.remove('hidden');
+    sentBox.classList.add('hidden');
+    activeEl.classList.add('hidden');
+    return;
+  }
+
+  // なまえ入力完了後、発表画面へ進む前の待機状態
+  if (appState.current_step === 'naming' && appState.all_names_submitted) {
+    waitingEl.classList.add('hidden');
+    sentBox.classList.remove('hidden');
     activeEl.classList.add('hidden');
     return;
   }
 
   waitingEl.classList.add('hidden');
+  sentBox.classList.add('hidden');
   activeEl.classList.remove('hidden');
 
-  // タブボタンのスタイリング
+  // 有効な写真があるスロットを特定
+  const validQuestions = appState.questions.filter(q => q.image !== null);
+  if (validQuestions.length === 0) {
+    waitingEl.classList.remove('hidden');
+    activeEl.classList.add('hidden');
+    return;
+  }
+
+  // 選択中のタブが写真のないスロットなら、写真のある最初のスロットに移動
+  if (!appState.questions[currentNamingTab] || !appState.questions[currentNamingTab].image) {
+    const firstValidIdx = appState.questions.findIndex(q => q.image !== null);
+    if (firstValidIdx !== -1) currentNamingTab = firstValidIdx;
+  }
+
+  // タブボタンの表示・活性化
   document.querySelectorAll('.name-tab-btn').forEach((btn, idx) => {
-    if (idx === currentNamingTab) {
-      btn.className = "name-tab-btn flex-1 py-2 rounded-xl font-black text-base transition-all bg-sky-500 text-white shadow-md border-2 border-sky-600 scale-105";
+    const q = appState.questions[idx];
+    if (!q || !q.image) {
+      btn.classList.add('opacity-40');
     } else {
-      btn.className = "name-tab-btn flex-1 py-2 rounded-xl font-black text-base transition-all bg-slate-200 text-slate-600 border-2 border-slate-300";
+      btn.classList.remove('opacity-40');
+    }
+
+    if (idx === currentNamingTab) {
+      btn.className = "name-tab-btn flex-1 py-2 rounded-xl font-black text-sm md:text-base transition-all bg-sky-500 text-white shadow-md border-2 border-sky-600 scale-105";
+    } else {
+      btn.className = "name-tab-btn flex-1 py-2 rounded-xl font-black text-sm md:text-base transition-all bg-slate-200 text-slate-600 border-2 border-slate-300";
     }
   });
 
-  // 選択中問題の写真と名前
   const currentQ = appState.questions[currentNamingTab];
   const photoPreview = document.getElementById('name-photo-preview');
   const nameInput = document.getElementById('name-input');
@@ -450,12 +603,19 @@ function renderPresentView() {
 
   document.getElementById('present-number').textContent = currentIdx + 1;
 
-  // タブ切り替えボタンの見た目
+  // タブ切り替えボタン
   document.querySelectorAll('.present-tab-btn').forEach((btn, idx) => {
-    if (idx === currentIdx) {
-      btn.className = "present-tab-btn px-4 py-1 rounded-full font-black text-sm bg-amber-500 text-white shadow scale-105";
+    const q = appState.questions[idx];
+    if (!q || !q.image) {
+      btn.classList.add('opacity-40');
     } else {
-      btn.className = "present-tab-btn px-4 py-1 rounded-full font-black text-sm bg-white text-slate-700 border border-slate-300 shadow-sm";
+      btn.classList.remove('opacity-40');
+    }
+
+    if (idx === currentIdx) {
+      btn.className = "present-tab-btn px-3 md:px-4 py-1 rounded-full font-black text-xs md:text-sm bg-amber-500 text-white shadow scale-105";
+    } else {
+      btn.className = "present-tab-btn px-3 md:px-4 py-1 rounded-full font-black text-xs md:text-sm bg-white text-slate-700 border border-slate-300 shadow-sm";
     }
   });
 
@@ -465,6 +625,7 @@ function renderPresentView() {
     photoEl.src = currentQ.image;
     photoEl.classList.remove('hidden');
   } else {
+    photoEl.src = "";
     photoEl.classList.add('hidden');
   }
 
@@ -511,15 +672,15 @@ function triggerMimicAnimation() {
       clearInterval(timer);
       countdownEl.classList.add('hidden');
       playSound('start');
-      playSound('mimic');
+      playSound('reveal');
       speak("まねっこスタート！みんなでポーズ！");
       mimicOverlay.classList.remove('hidden');
 
-      // 6秒後に自動でオーバーレイ解除
       setTimeout(() => {
         mimicOverlay.classList.add('hidden');
         if (myRole === 'teacher') {
-          pushState({ is_mimicking: false });
+          appState.is_mimicking = false;
+          publishState(true);
         }
       }, 6000);
     }
@@ -544,7 +705,7 @@ function generateQrCode(url) {
 
 // ==================== 6. イベントリスナー登録 ====================
 function initEventListeners() {
-  // 音声コンテキストの初期化（初回タップ）
+  // 初回タップで音声アンロック
   document.body.addEventListener('click', () => {
     getAudioContext();
   }, { once: true });
@@ -573,20 +734,36 @@ function initEventListeners() {
     renderUI();
   });
 
+  // ヘッダーロゴクリックでトップへ
+  document.getElementById('header-logo').addEventListener('click', () => {
+    playSound('click');
+    myRole = null;
+    renderUI();
+  });
+
   // 音声ON/OFF切り替え
   document.getElementById('btn-toggle-sound').addEventListener('click', () => {
     soundEnabled = !soundEnabled;
     const icon = document.getElementById('icon-sound');
     if (soundEnabled) {
       icon.setAttribute('data-lucide', 'volume-2');
-      icon.className = "w-5 h-5 text-amber-600";
+      icon.className = "w-4 h-4 md:w-5 md:h-5 text-amber-600";
       playSound('click');
     } else {
       icon.setAttribute('data-lucide', 'volume-x');
-      icon.className = "w-5 h-5 text-slate-400";
+      icon.className = "w-4 h-4 md:w-5 md:h-5 text-slate-400";
     }
     if (window.lucide) lucide.createIcons();
   });
+
+  // 使い方モーダル
+  document.getElementById('btn-show-help').addEventListener('click', () => {
+    playSound('click');
+    document.getElementById('modal-help').classList.remove('hidden');
+  });
+  const closeHelp = () => document.getElementById('modal-help').classList.add('hidden');
+  document.getElementById('btn-close-help').addEventListener('click', closeHelp);
+  document.getElementById('btn-close-help-2').addEventListener('click', closeHelp);
 
   // QRモーダル
   document.getElementById('btn-show-qr').addEventListener('click', () => {
@@ -597,6 +774,17 @@ function initEventListeners() {
   document.getElementById('btn-close-qr').addEventListener('click', closeQr);
   document.getElementById('btn-close-qr-2').addEventListener('click', closeQr);
 
+  // あいことば変更
+  document.getElementById('btn-change-room').addEventListener('click', () => {
+    playSound('click');
+    const input = prompt("あたらしい『あいことば』を いれてね（例: まねっこ2）", roomId.replace('manekko_', ''));
+    if (input && input.trim()) {
+      roomId = "manekko_" + encodeURIComponent(input.trim());
+      localStorage.setItem('manekko_room_id', roomId);
+      location.reload();
+    }
+  });
+
   // ---------- 撮影画面のイベント ----------
   document.querySelectorAll('.photo-input').forEach(input => {
     input.addEventListener('change', async (e) => {
@@ -604,13 +792,13 @@ function initEventListeners() {
       if (!file) return;
       const slot = parseInt(e.target.dataset.slot, 10);
       try {
-        const compressedBase64 = await compressImage(file, 800, 0.7);
+        const compressedBase64 = await compressImage(file, 640, 0.6);
         playSound('shutter');
         
-        // 状態を更新
-        const newQuestions = [...appState.questions];
-        newQuestions[slot - 1].image = compressedBase64;
-        await pushState({ questions: newQuestions });
+        // 状態を更新してクラウド同期
+        appState.questions[slot - 1].image = compressedBase64;
+        publishState(true);
+        renderUI();
       } catch (err) {
         console.error("写真読み込みエラー", err);
       }
@@ -625,11 +813,22 @@ function initEventListeners() {
     });
   });
 
-  // 写真送信ボタン（3枚撮ったら）
-  document.getElementById('btn-submit-photos').addEventListener('click', async () => {
+  // 写真送信ボタン
+  document.getElementById('btn-submit-photos').addEventListener('click', () => {
     playSound('success');
     speak("写真を送りました！");
-    await pushState({ current_step: 'naming' });
+    appState.current_step = 'naming';
+    appState.all_names_submitted = false;
+    publishState(true);
+    renderUI();
+  });
+
+  // 送信後に写真を再修正
+  document.getElementById('btn-shoot-edit-again').addEventListener('click', () => {
+    playSound('click');
+    appState.current_step = 'shooting';
+    publishState(true);
+    renderUI();
   });
 
   // ---------- なまえつけ画面のイベント ----------
@@ -641,22 +840,20 @@ function initEventListeners() {
     });
   });
 
-  // 名前入力更新
   const nameInput = document.getElementById('name-input');
   nameInput.addEventListener('input', () => {
     const val = nameInput.value;
-    const newQuestions = [...appState.questions];
-    newQuestions[currentNamingTab].name = val;
-    // ローカル更新＆相手へ同期
-    pushState({ questions: newQuestions });
+    appState.questions[currentNamingTab].name = val;
+    // 名前はリアルタイムに同期
+    publishState(true);
   });
 
-  // おたすけことばチップの生成とタップ処理
+  // おたすけことばチップ
   const chipsContainer = document.getElementById('word-chips');
   chipsContainer.innerHTML = "";
   HELPER_WORDS.forEach(word => {
     const chip = document.createElement('button');
-    chip.className = "bg-white hover:bg-sky-100 active:scale-95 text-sky-800 text-sm md:text-base font-extrabold px-3 py-1.5 rounded-full border-2 border-sky-300 shadow-sm transition-all";
+    chip.className = "bg-white hover:bg-sky-100 active:scale-95 text-sky-800 text-xs md:text-sm font-extrabold px-3 py-1.5 rounded-full border-2 border-sky-300 shadow-sm transition-all";
     chip.textContent = word;
     chip.addEventListener('click', () => {
       playSound('click');
@@ -670,51 +867,67 @@ function initEventListeners() {
   // つぎの問へ
   document.getElementById('btn-next-name').addEventListener('click', () => {
     playSound('click');
-    if (currentNamingTab < 2) {
-      currentNamingTab++;
-      renderNameView();
+    // 写真のある次のスロットを探す
+    let nextIdx = (currentNamingTab + 1) % 3;
+    while (!appState.questions[nextIdx]?.image && nextIdx !== currentNamingTab) {
+      nextIdx = (nextIdx + 1) % 3;
     }
+    currentNamingTab = nextIdx;
+    renderNameView();
   });
 
-  // なまえ完成・送信ボタン
-  document.getElementById('btn-submit-names').addEventListener('click', async () => {
+  // なまえ送信ボタン
+  document.getElementById('btn-submit-names').addEventListener('click', () => {
     playSound('success');
     speak("名前をつけました！発表の準備完了です！");
-    await pushState({
-      current_step: 'presenting',
-      presenting_index: 0,
-      show_answer: false,
-      is_mimicking: false
-    });
+    appState.all_names_submitted = true;
+    appState.current_step = 'presenting';
+    appState.presenting_index = 0;
+    appState.show_answer = false;
+    appState.is_mimicking = false;
+    publishState(true);
+    renderUI();
+  });
+
+  // 送信後になまえを再修正
+  document.getElementById('btn-name-edit-again').addEventListener('click', () => {
+    playSound('click');
+    appState.all_names_submitted = false;
+    appState.current_step = 'naming';
+    publishState(true);
+    renderUI();
   });
 
   // ---------- 発表・まねっこ画面のイベント ----------
   document.querySelectorAll('.present-tab-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => {
       playSound('click');
       const idx = parseInt(btn.dataset.idx, 10);
-      await pushState({
-        presenting_index: idx,
-        show_answer: false,
-        is_mimicking: false
-      });
+      appState.presenting_index = idx;
+      appState.show_answer = false;
+      appState.is_mimicking = false;
+      publishState(true);
+      renderUI();
       speak(`第 ${idx + 1} 問！`);
     });
   });
 
-  // オープン（なまえ表示）
-  document.getElementById('btn-reveal-answer').addEventListener('click', async () => {
+  // オープン
+  document.getElementById('btn-reveal-answer').addEventListener('click', () => {
     if (!appState.show_answer) {
       playSound('reveal');
-      await pushState({ show_answer: true });
+      appState.show_answer = true;
+      publishState(true);
+      renderUI();
       const q = appState.questions[appState.presenting_index];
       if (q && q.name) speak(`名前は、${q.name} です！`);
     }
   });
 
   // まねっこスタート
-  document.getElementById('btn-start-mimic').addEventListener('click', async () => {
-    await pushState({ is_mimicking: true });
+  document.getElementById('btn-start-mimic').addEventListener('click', () => {
+    appState.is_mimicking = true;
+    publishState(true);
     triggerMimicAnimation();
   });
 
@@ -729,84 +942,136 @@ function initEventListeners() {
   });
 
   // つぎのもん
-  document.getElementById('btn-next-question').addEventListener('click', async () => {
+  document.getElementById('btn-next-question').addEventListener('click', () => {
     playSound('click');
-    const nextIdx = (appState.presenting_index + 1) % 3;
-    await pushState({
-      presenting_index: nextIdx,
-      show_answer: false,
-      is_mimicking: false
-    });
+    let nextIdx = (appState.presenting_index + 1) % 3;
+    while (!appState.questions[nextIdx]?.image && nextIdx !== appState.presenting_index) {
+      nextIdx = (nextIdx + 1) % 3;
+    }
+    appState.presenting_index = nextIdx;
+    appState.show_answer = false;
+    appState.is_mimicking = false;
+    publishState(true);
+    renderUI();
     speak(`第 ${nextIdx + 1} 問！`);
   });
 
-  // 攻守交代（やくわりチェンジ）
-  document.getElementById('btn-swap-roles').addEventListener('click', async () => {
+  // 攻守交代
+  document.getElementById('btn-swap-roles').addEventListener('click', () => {
     playSound('success');
     speak("こうたい！ 役割を交代します！");
-    if (isServerAvailable) {
-      try {
-        const res = await fetch('/api/swap', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) applyState(data.state);
-      } catch (e) {
-        console.error(e);
-      }
-    } else {
-      // ローカル反転
-      const curA = appState.team_roles.team_a;
-      await pushState({
-        round: appState.round + 1,
-        current_step: 'shooting',
-        team_roles: {
-          team_a: curA === 'shooter' ? 'namer' : 'shooter',
-          team_b: curA === 'shooter' ? 'shooter' : 'namer'
-        },
-        questions: [
-          { id: 1, image: null, name: "" },
-          { id: 2, image: null, name: "" },
-          { id: 3, image: null, name: "" }
-        ],
-        presenting_index: 0,
-        show_answer: false,
-        is_mimicking: false
-      });
-    }
+    const curA = appState.team_roles.team_a;
+    appState.round += 1;
+    appState.current_step = 'shooting';
+    appState.all_names_submitted = false;
+    appState.team_roles = {
+      team_a: curA === 'shooter' ? 'namer' : 'shooter',
+      team_b: curA === 'shooter' ? 'shooter' : 'namer'
+    };
+    appState.questions = [
+      { id: 1, image: null, name: "" },
+      { id: 2, image: null, name: "" },
+      { id: 3, image: null, name: "" }
+    ];
+    appState.presenting_index = 0;
+    appState.show_answer = false;
+    appState.is_mimicking = false;
+    publishState(true);
+    renderUI();
   });
 
   // 最初からリセット
-  document.getElementById('btn-reset-game').addEventListener('click', async () => {
+  document.getElementById('btn-reset-game').addEventListener('click', () => {
     if (!confirm("さいしょから やりなおしますか？")) return;
     playSound('click');
-    if (isServerAvailable) {
-      try {
-        const res = await fetch('/api/reset', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) applyState(data.state);
-      } catch (e) {
-        console.error(e);
-      }
-    } else {
-      await pushState({
-        round: 1,
-        current_step: 'shooting',
-        team_roles: { team_a: 'shooter', team_b: 'namer' },
-        questions: [
-          { id: 1, image: null, name: "" },
-          { id: 2, image: null, name: "" },
-          { id: 3, image: null, name: "" }
-        ],
-        presenting_index: 0,
-        show_answer: false,
-        is_mimicking: false
-      });
+    appState.round = 1;
+    appState.current_step = 'shooting';
+    appState.all_names_submitted = false;
+    appState.team_roles = { team_a: 'shooter', team_b: 'namer' };
+    appState.questions = [
+      { id: 1, image: null, name: "" },
+      { id: 2, image: null, name: "" },
+      { id: 3, image: null, name: "" }
+    ];
+    appState.presenting_index = 0;
+    appState.show_answer = false;
+    appState.is_mimicking = false;
+    publishState(true);
+    renderUI();
+  });
+
+  // ---------- 先生おたすけ操作モーダル ----------
+  document.getElementById('btn-emergency-rescue').addEventListener('click', () => {
+    playSound('click');
+    document.getElementById('modal-rescue').classList.remove('hidden');
+  });
+  const closeRescue = () => document.getElementById('modal-rescue').classList.add('hidden');
+  document.getElementById('btn-close-rescue').addEventListener('click', closeRescue);
+  document.getElementById('btn-close-rescue-2').addEventListener('click', closeRescue);
+
+  // サンプル写真をセットして即送信
+  document.getElementById('btn-rescue-sample-photos').addEventListener('click', () => {
+    playSound('success');
+    appState.questions[0].image = SAMPLE_POSES[0];
+    appState.questions[1].image = SAMPLE_POSES[1];
+    appState.questions[2].image = SAMPLE_POSES[2];
+    appState.current_step = 'naming';
+    publishState(true);
+    renderUI();
+    closeRescue();
+    alert("3まいの サンプル写真を セットして なまえつけへ おくりました！");
+  });
+
+  // 強制的に名前つけへ進む
+  document.getElementById('btn-rescue-to-naming').addEventListener('click', () => {
+    playSound('click');
+    if (!appState.questions[0].image) {
+      appState.questions[0].image = SAMPLE_POSES[0];
     }
+    appState.current_step = 'naming';
+    publishState(true);
+    renderUI();
+    closeRescue();
+  });
+
+  // 強制的に発表へ進む
+  document.getElementById('btn-rescue-to-present').addEventListener('click', () => {
+    playSound('click');
+    if (!appState.questions[0].image) appState.questions[0].image = SAMPLE_POSES[0];
+    if (!appState.questions[0].name) appState.questions[0].name = "うさぎ ぴょんぴょん";
+    appState.current_step = 'presenting';
+    appState.presenting_index = 0;
+    appState.show_answer = false;
+    appState.is_mimicking = false;
+    publishState(true);
+    renderUI();
+    closeRescue();
   });
 }
 
 // ==================== 7. 初期化 ====================
 window.addEventListener('DOMContentLoaded', async () => {
+  // 保存されたあいことばの復帰
+  const savedRoom = localStorage.getItem('manekko_room_id');
+  if (savedRoom) roomId = savedRoom;
+
+  // LocalStorageから直前の状態を復元（リロード時の復旧）
+  try {
+    const savedState = localStorage.getItem('manekko_saved_state');
+    if (savedState) {
+      const parsed = JSON.parse(savedState);
+      if (parsed) appState = { ...appState, ...parsed };
+    }
+  } catch (e) {}
+
   initEventListeners();
-  await initSync();
+  initBroadcastChannel();
+  initMqtt();
+  checkLocalServer();
+
+  // QRコード初期生成
+  generateQrCode(window.location.href);
+  document.getElementById('qr-url-text').textContent = window.location.href;
+
   renderUI();
 });
