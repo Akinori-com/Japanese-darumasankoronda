@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>まねっこあそび 🌟</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="まねっこ">
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts: M PLUS Rounded 1c (特別支援学校で見やすい丸ゴシック) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;700;800;900&display=swap" rel="stylesheet">
+  <!-- PeerJS (クラウドP2P接続用) -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- qrcode.js (QRコード生成用) -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    body {
+      font-family: 'M PLUS Rounded 1c', sans-serif;
+      touch-action: manipulation;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    input, textarea {
+      user-select: auto;
+      -webkit-user-select: auto;
+    }
+    /* アニメーション効果 */
+    @keyframes bounce-slow {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-8px); }
+    }
+    .animate-bounce-slow {
+      animation: bounce-slow 2s infinite ease-in-out;
+    }
+    @keyframes pulse-ring {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+      70% { transform: scale(1); box-shadow: 0 0 0 16px rgba(239, 68, 68, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    }
+    .pulse-ring {
+      animation: pulse-ring 2s infinite;
+    }
+    /* モバイル・iPad Safariでのスクロールバー隠し */
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+  </style>
+</head>
+<body class="bg-amber-50 text-slate-800 min-h-screen flex flex-col justify-between overflow-x-hidden">
+
+  <!-- ヘッダーバー -->
+  <header class="bg-white/90 backdrop-blur border-b-4 border-amber-200 sticky top-0 z-30 px-4 py-2 flex items-center justify-between shadow-sm">
+    <div class="flex items-center gap-2">
+      <button id="btn-back" class="hidden bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold px-3 py-1.5 rounded-full text-base flex items-center gap-1 border-2 border-slate-300">
+        <i data-lucide="arrow-left" class="w-5 h-5"></i>
+        <span>もどる</span>
+      </button>
+      <div class="flex items-center gap-2">
+        <span class="text-2xl">🌟</span>
+        <h1 class="text-xl md:text-2xl font-black text-amber-600 tracking-wider">まねっこあそび</h1>
+      </div>
+    </div>
+
+    <!-- 現在のチーム表示バッジ -->
+    <div id="current-role-badge" class="hidden items-center gap-2 px-3 py-1 rounded-full text-sm md:text-base font-black shadow-sm">
+      <span id="role-badge-text">チーム</span>
+    </div>
+
+    <!-- 右側：接続状態＆QRボタン＆音量 -->
+    <div class="flex items-center gap-2">
+      <div id="sync-status" class="flex items-center gap-1.5 bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full text-xs md:text-sm font-bold border border-emerald-300">
+        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span id="sync-status-text">つうしん中</span>
+      </div>
+      <button id="btn-show-qr" class="bg-amber-100 hover:bg-amber-200 text-amber-800 p-2 rounded-full active:scale-95 border border-amber-300" title="iPadをつなぐQRコード">
+        <i data-lucide="qr-code" class="w-5 h-5"></i>
+      </button>
+      <button id="btn-toggle-sound" class="bg-slate-100 hover:bg-slate-200 text-slate-700 p-2 rounded-full active:scale-95 border border-slate-300" title="おとのON/OFF">
+        <i data-lucide="volume-2" id="icon-sound" class="w-5 h-5 text-amber-600"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- メインコンテンツ領域 -->
+  <main class="flex-1 max-w-5xl w-full mx-auto p-3 md:p-6 flex flex-col justify-center">
+
+    <!-- ==================== ① トップ画面：チームをえらぶ ==================== -->
+    <div id="view-top" class="flex flex-col items-center justify-center space-y-6 py-4">
+      <div class="text-center space-y-2">
+        <div class="inline-block bg-amber-200 text-amber-900 font-extrabold px-4 py-1.5 rounded-full text-base md:text-lg mb-1 shadow-sm">
+          だい <span id="round-display">1</span> かいせん 🚩
+        </div>
+        <h2 class="text-2xl md:text-4xl font-black text-slate-800">
+          きょうの チームを えらんでね！
+        </h2>
+        <p class="text-slate-600 text-sm md:text-base font-bold">
+          じぶんの チームの ボタンを タッチしよう
+        </p>
+      </div>
+
+      <!-- チーム選択カード一覧 -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 w-full max-w-3xl">
+        <!-- あかチーム（さつえい or なまえつけ） -->
+        <button id="btn-select-team-a" class="group bg-gradient-to-b from-rose-50 to-rose-100 hover:from-rose-100 hover:to-rose-200 active:scale-98 border-4 border-rose-400 rounded-3xl p-5 md:p-8 flex flex-col items-center text-center shadow-lg transition-all duration-200">
+          <div class="w-20 h-20 md:w-24 md:h-24 rounded-full bg-rose-500 text-white flex items-center justify-center text-4xl md:text-5xl shadow-md mb-3 group-hover:scale-105 transition-transform">
+            <span id="team-a-icon">📷</span>
+          </div>
+          <span class="text-2xl md:text-3xl font-black text-rose-600 mb-1">あかチーム</span>
+          <span id="team-a-role-text" class="text-lg md:text-xl font-extrabold text-slate-700 bg-white/80 px-4 py-1 rounded-full border border-rose-200">
+            ポーズを さつえい するよ！
+          </span>
+        </button>
+
+        <!-- あおチーム（さつえい or なまえつけ） -->
+        <button id="btn-select-team-b" class="group bg-gradient-to-b from-sky-50 to-sky-100 hover:from-sky-100 hover:to-sky-200 active:scale-98 border-4 border-sky-400 rounded-3xl p-5 md:p-8 flex flex-col items-center text-center shadow-lg transition-all duration-200">
+          <div class="w-20 h-20 md:w-24 md:h-24 rounded-full bg-sky-500 text-white flex items-center justify-center text-4xl md:text-5xl shadow-md mb-3 group-hover:scale-105 transition-transform">
+            <span id="team-b-icon">✏️</span>
+          </div>
+          <span class="text-2xl md:text-3xl font-black text-sky-600 mb-1">あおチーム</span>
+          <span id="team-b-role-text" class="text-lg md:text-xl font-extrabold text-slate-700 bg-white/80 px-4 py-1 rounded-full border border-sky-200">
+            なまえを つけるよ！
+          </span>
+        </button>
+      </div>
+
+      <!-- せんせい・モニター用ボタン -->
+      <div class="w-full max-w-3xl pt-2">
+        <button id="btn-select-teacher" class="w-full bg-gradient-to-r from-amber-400 to-orange-400 hover:from-amber-500 hover:to-orange-500 active:scale-98 text-white font-black text-xl md:text-2xl py-4 px-6 rounded-2xl shadow-lg border-2 border-amber-300 flex items-center justify-center gap-3">
+          <i data-lucide="tv" class="w-7 h-7"></i>
+          <span>📺 せんせい・おおきい がめん（はっぴょう）</span>
+        </button>
+      </div>
+    </div>
+
+
+    <!-- ==================== ② さつえい画面（出題グループ用） ==================== -->
+    <div id="view-shoot" class="hidden flex-col items-center space-y-4 py-2">
+      <div class="text-center">
+        <span class="bg-rose-100 text-rose-700 font-extrabold px-4 py-1 rounded-full text-base border border-rose-300">
+          📷 さつえい タイム
+        </span>
+        <h2 class="text-2xl md:text-3xl font-black text-slate-800 mt-1">
+          ポーズを 3つ とって しゃしんを とろう！
+        </h2>
+        <p class="text-slate-600 text-sm md:text-base font-bold">
+          カメラボタンを タッチして パシャリ！
+        </p>
+      </div>
+
+      <!-- 3問分の写真スロット -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 w-full">
+        <!-- 1もんめスロット -->
+        <div class="bg-white rounded-3xl p-4 border-4 border-amber-200 shadow-md flex flex-col items-center text-center relative" id="shoot-card-1">
+          <div class="bg-amber-400 text-white font-black px-4 py-1 rounded-full text-base mb-2 shadow-sm">
+            だい 1 もん
+          </div>
+          <!-- プレビュー枠 -->
+          <div class="w-full aspect-[4/3] bg-slate-100 rounded-2xl overflow-hidden border-2 border-dashed border-slate-300 flex items-center justify-center relative mb-3">
+            <img id="shoot-preview-1" class="hidden w-full h-full object-cover" alt="1もんめの写真">
+            <div id="shoot-placeholder-1" class="flex flex-col items-center text-slate-400">
+              <i data-lucide="camera" class="w-12 h-12 mb-1"></i>
+              <span class="font-bold text-sm">まだ とっていません</span>
+            </div>
+          </div>
+          <!-- 操作ボタン -->
+          <div class="flex gap-2 w-full">
+            <label class="flex-1 bg-rose-500 hover:bg-rose-600 active:scale-95 text-white font-black py-2.5 px-3 rounded-xl cursor-pointer text-center flex items-center justify-center gap-1 shadow-md">
+              <i data-lucide="camera" class="w-5 h-5"></i>
+              <span id="shoot-btn-text-1">とる！</span>
+              <input type="file" accept="image/*" capture="environment" class="hidden photo-input" data-slot="1">
+            </label>
+            <button class="btn-retake hidden bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-3 py-2.5 rounded-xl border border-slate-300" data-slot="1" title="とりなおす">
+              <i data-lucide="rotate-ccw" class="w-5 h-5"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- 2もんめスロット -->
+        <div class="bg-white rounded-3xl p-4 border-4 border-amber-200 shadow-md flex flex-col items-center text-center relative" id="shoot-card-2">
+          <div class="bg-amber-400 text-white font-black px-4 py-1 rounded-full text-base mb-2 shadow-sm">
+            だい 2 もん
+          </div>
+          <div class="w-full aspect-[4/3] bg-slate-100 rounded-2xl overflow-hidden border-2 border-dashed border-slate-300 flex items-center justify-center relative mb-3">
+            <img id="shoot-preview-2" class="hidden w-full h-full object-cover" alt="2もんめの写真">
+            <div id="shoot-placeholder-2" class="flex flex-col items-center text-slate-400">
+              <i data-lucide="camera" class="w-12 h-12 mb-1"></i>
+              <span class="font-bold text-sm">まだ とっていません</span>
+            </div>
+          </div>
+          <div class="flex gap-2 w-full">
+            <label class="flex-1 bg-rose-500 hover:bg-rose-600 active:scale-95 text-white font-black py-2.5 px-3 rounded-xl cursor-pointer text-center flex items-center justify-center gap-1 shadow-md">
+              <i data-lucide="camera" class="w-5 h-5"></i>
+              <span id="shoot-btn-text-2">とる！</span>
+              <input type="file" accept="image/*" capture="environment" class="hidden photo-input" data-slot="2">
+            </label>
+            <button class="btn-retake hidden bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-3 py-2.5 rounded-xl border border-slate-300" data-slot="2" title="とりなおす">
+              <i data-lucide="rotate-ccw" class="w-5 h-5"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- 3もんめスロット -->
+        <div class="bg-white rounded-3xl p-4 border-4 border-amber-200 shadow-md flex flex-col items-center text-center relative" id="shoot-card-3">
+          <div class="bg-amber-400 text-white font-black px-4 py-1 rounded-full text-base mb-2 shadow-sm">
+            だい 3 もん
+          </div>
+          <div class="w-full aspect-[4/3] bg-slate-100 rounded-2xl overflow-hidden border-2 border-dashed border-slate-300 flex items-center justify-center relative mb-3">
+            <img id="shoot-preview-3" class="hidden w-full h-full object-cover" alt="3もんめの写真">
+            <div id="shoot-placeholder-3" class="flex flex-col items-center text-slate-400">
+              <i data-lucide="camera" class="w-12 h-12 mb-1"></i>
+              <span class="font-bold text-sm">まだ とっていません</span>
+            </div>
+          </div>
+          <div class="flex gap-2 w-full">
+            <label class="flex-1 bg-rose-500 hover:bg-rose-600 active:scale-95 text-white font-black py-2.5 px-3 rounded-xl cursor-pointer text-center flex items-center justify-center gap-1 shadow-md">
+              <i data-lucide="camera" class="w-5 h-5"></i>
+              <span id="shoot-btn-text-3">とる！</span>
+              <input type="file" accept="image/*" capture="environment" class="hidden photo-input" data-slot="3">
+            </label>
+            <button class="btn-retake hidden bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-3 py-2.5 rounded-xl border border-slate-300" data-slot="3" title="とりなおす">
+              <i data-lucide="rotate-ccw" class="w-5 h-5"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 送信ボタン（3枚撮ったら活性化） -->
+      <div class="w-full max-w-xl pt-2">
+        <button id="btn-submit-photos" disabled class="w-full bg-slate-300 text-slate-500 font-black text-xl md:text-2xl py-4 rounded-2xl shadow-lg border-2 border-slate-300 flex items-center justify-center gap-3 cursor-not-allowed transition-all duration-300">
+          <i data-lucide="send" class="w-7 h-7"></i>
+          <span id="btn-submit-photos-text">3まい とると おくれるよ！</span>
+        </button>
+      </div>
+    </div>
+
+
+    <!-- ==================== ③ なまえつけ画面（回答グループ用） ==================== -->
+    <div id="view-name" class="hidden flex-col items-center space-y-4 py-2">
+      <!-- 撮影待機中のプレースホルダー -->
+      <div id="name-waiting" class="flex flex-col items-center justify-center py-12 text-center space-y-4">
+        <div class="w-24 h-24 rounded-full bg-sky-100 text-sky-500 flex items-center justify-center text-5xl animate-bounce">
+          ⏳
+        </div>
+        <h2 class="text-2xl md:text-3xl font-black text-slate-800">
+          あいてのチームが さつえい中だよ…
+        </h2>
+        <p class="text-slate-600 text-base md:text-lg font-bold">
+          しゃしんが とどくまで すこし まっててね！
+        </p>
+      </div>
+
+      <!-- 写真が届いた後の入力UI -->
+      <div id="name-active" class="hidden flex-col items-center w-full space-y-4">
+        <div class="text-center">
+          <span class="bg-sky-100 text-sky-700 font-extrabold px-4 py-1 rounded-full text-base border border-sky-300">
+            ✏️ なまえつけ タイム
+          </span>
+          <h2 class="text-2xl md:text-3xl font-black text-slate-800 mt-1">
+            どんな うごきかな？ なまえを つけよう！
+          </h2>
+        </div>
+
+        <!-- もん選択タブ -->
+        <div class="flex gap-2 w-full max-w-md justify-center">
+          <button class="name-tab-btn flex-1 py-2 rounded-xl font-black text-base transition-all bg-sky-500 text-white shadow-md border-2 border-sky-600" data-tab="0">
+            だい 1 もん
+          </button>
+          <button class="name-tab-btn flex-1 py-2 rounded-xl font-black text-base transition-all bg-slate-200 text-slate-600 border-2 border-slate-300" data-tab="1">
+            だい 2 もん
+          </button>
+          <button class="name-tab-btn flex-1 py-2 rounded-xl font-black text-base transition-all bg-slate-200 text-slate-600 border-2 border-slate-300" data-tab="2">
+            だい 3 もん
+          </button>
+        </div>
+
+        <!-- 選択中の問題カード -->
+        <div class="bg-white rounded-3xl p-5 border-4 border-sky-200 shadow-xl w-full max-w-xl flex flex-col items-center">
+          <!-- 写真プレビュー -->
+          <div class="w-full aspect-[4/3] max-w-md bg-slate-100 rounded-2xl overflow-hidden border-2 border-slate-200 shadow-inner mb-4 flex items-center justify-center">
+            <img id="name-photo-preview" class="w-full h-full object-cover" alt="対象の写真">
+          </div>
+
+          <!-- なまえ入力欄（iPad標準キーボード用・特大表示） -->
+          <div class="w-full space-y-2">
+            <label class="block text-slate-700 font-extrabold text-base md:text-lg text-center">
+              👇 この うごきの なまえ（ひらがな）
+            </label>
+            <input type="text" id="name-input" placeholder="例：うさぎぴょんぴょん" enterkeyhint="done" lang="ja"
+              class="w-full text-center text-2xl md:text-3xl font-black py-3 px-4 rounded-2xl border-4 border-sky-400 focus:border-amber-400 focus:outline-none bg-sky-50/50 shadow-inner tracking-wider">
+          </div>
+
+          <!-- おたすけことば（タップで入力できる支援チップ） -->
+          <div class="w-full mt-4 pt-3 border-t-2 border-dashed border-slate-200">
+            <p class="text-xs md:text-sm font-bold text-slate-500 mb-2 text-center">
+              💡 おたすけことば（タップしていれる）
+            </p>
+            <div class="flex flex-wrap gap-1.5 justify-center" id="word-chips">
+              <!-- JSでチップを自動展開 -->
+            </div>
+          </div>
+        </div>
+
+        <!-- 決定・送信ボタン -->
+        <div class="w-full max-w-xl flex gap-3">
+          <button id="btn-next-name" class="flex-1 bg-gradient-to-r from-sky-400 to-blue-500 hover:from-sky-500 hover:to-blue-600 active:scale-98 text-white font-black text-xl py-3.5 rounded-2xl shadow-lg border-2 border-sky-300 flex items-center justify-center gap-2">
+            <span>つぎの もんへ</span>
+            <i data-lucide="arrow-right" class="w-6 h-6"></i>
+          </button>
+          <button id="btn-submit-names" class="flex-1 bg-gradient-to-r from-emerald-400 to-green-500 hover:from-emerald-500 hover:to-green-600 active:scale-98 text-white font-black text-xl py-3.5 rounded-2xl shadow-lg border-2 border-emerald-300 flex items-center justify-center gap-2">
+            <i data-lucide="check-circle" class="w-6 h-6"></i>
+            <span>できた！おくる</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- ==================== ④ はっぴょう・まねっこ画面（電子黒板・全員） ==================== -->
+    <div id="view-present" class="hidden flex-col items-center space-y-4 py-2">
+      <!-- 画面ヘッダー情報 -->
+      <div class="flex items-center justify-between w-full max-w-4xl px-2">
+        <span class="bg-amber-400 text-white font-black px-4 py-1.5 rounded-full text-lg shadow-sm">
+          だい <span id="present-number">1</span> もん
+        </span>
+        <div class="flex gap-2">
+          <button class="present-tab-btn px-4 py-1 rounded-full font-black text-sm bg-amber-500 text-white shadow" data-idx="0">1もんめ</button>
+          <button class="present-tab-btn px-4 py-1 rounded-full font-black text-sm bg-white text-slate-700 border border-slate-300 shadow-sm" data-idx="1">2もんめ</button>
+          <button class="present-tab-btn px-4 py-1 rounded-full font-black text-sm bg-white text-slate-700 border border-slate-300 shadow-sm" data-idx="2">3もんめ</button>
+        </div>
+      </div>
+
+      <!-- メインカード：写真 ＋ 名前 ＋ まねっこエフェクト -->
+      <div id="present-card" class="bg-white rounded-3xl p-4 md:p-6 border-4 border-amber-300 shadow-2xl w-full max-w-4xl flex flex-col items-center relative overflow-hidden transition-all duration-300">
+        
+        <!-- 写真表示部 -->
+        <div class="w-full aspect-[16/10] md:aspect-[16/9] max-h-[50vh] bg-slate-100 rounded-2xl overflow-hidden border-2 border-slate-300 shadow-inner flex items-center justify-center relative">
+          <img id="present-photo" class="w-full h-full object-contain" alt="発表写真">
+          
+          <!-- まねっこ中のオーバーレイ演出 -->
+          <div id="mimic-overlay" class="hidden absolute inset-0 bg-amber-500/80 backdrop-blur-sm flex flex-col items-center justify-center text-white z-20 animate-pulse">
+            <span class="text-6xl md:text-8xl mb-2 animate-bounce">🏃💨</span>
+            <h3 class="text-4xl md:text-6xl font-black tracking-widest drop-shadow-md">
+              まねっこタイム！！
+            </h3>
+            <p class="text-xl md:text-2xl font-bold mt-2 bg-white/30 px-6 py-2 rounded-full">
+              おなじ ポーズを やってみよう！
+            </p>
+          </div>
+
+          <!-- カウントダウン演出 -->
+          <div id="countdown-overlay" class="hidden absolute inset-0 bg-black/70 flex flex-col items-center justify-center text-white z-30">
+            <span id="countdown-number" class="text-8xl md:text-9xl font-black text-amber-300 animate-ping">3</span>
+            <span class="text-2xl font-black mt-4">まねっこ じゅんび…！</span>
+          </div>
+        </div>
+
+        <!-- なまえ表示エリア -->
+        <div class="w-full mt-4 flex flex-col items-center">
+          <div class="text-slate-500 font-bold text-sm md:text-base mb-1">
+            この うごきの なまえは…？
+          </div>
+          <!-- 名前の答え枠 -->
+          <div id="answer-container" class="w-full min-h-[72px] bg-amber-50 border-4 border-dashed border-amber-400 rounded-2xl flex items-center justify-center px-4 py-2 shadow-inner">
+            <span id="present-answer-text" class="text-3xl md:text-5xl font-black text-amber-600 tracking-wider">
+              ？？？？？
+            </span>
+          </div>
+        </div>
+
+        <!-- 先生・発表者用 コントロールボタン群 -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 md:gap-3 w-full mt-5">
+          <!-- なまえオープンボタン -->
+          <button id="btn-reveal-answer" class="bg-gradient-to-r from-amber-400 to-orange-400 hover:from-amber-500 hover:to-orange-500 active:scale-95 text-white font-black py-3 px-3 rounded-2xl shadow-md border-2 border-amber-300 flex items-center justify-center gap-1.5 text-base md:text-lg">
+            <i data-lucide="eye" class="w-5 h-5"></i>
+            <span>オープン！</span>
+          </button>
+
+          <!-- まねっこスタートボタン -->
+          <button id="btn-start-mimic" class="bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 active:scale-95 text-white font-black py-3 px-3 rounded-2xl shadow-md border-2 border-rose-400 flex items-center justify-center gap-1.5 text-base md:text-lg pulse-ring">
+            <i data-lucide="play" class="w-5 h-5"></i>
+            <span>まねっこ！</span>
+          </button>
+
+          <!-- よみあげボタン -->
+          <button id="btn-speak-name" class="bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold py-3 px-3 rounded-2xl border-2 border-slate-300 flex items-center justify-center gap-1.5 text-sm md:text-base">
+            <i data-lucide="volume-2" class="w-5 h-5 text-amber-600"></i>
+            <span>よみあげ</span>
+          </button>
+
+          <!-- つぎのもんへボタン -->
+          <button id="btn-next-question" class="bg-sky-500 hover:bg-sky-600 active:scale-95 text-white font-black py-3 px-3 rounded-2xl shadow-md border-2 border-sky-400 flex items-center justify-center gap-1.5 text-base md:text-lg">
+            <span>つぎのもん</span>
+            <i data-lucide="chevron-right" class="w-5 h-5"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- 攻守交代＆リセットボタン -->
+      <div class="flex gap-4 w-full max-w-4xl justify-center pt-2">
+        <button id="btn-swap-roles" class="bg-purple-500 hover:bg-purple-600 active:scale-95 text-white font-black px-6 py-3 rounded-2xl shadow-lg border-2 border-purple-400 flex items-center gap-2 text-base md:text-lg">
+          <i data-lucide="refresh-cw" class="w-6 h-6"></i>
+          <span>こうたい！（やくわりチェンジ）</span>
+        </button>
+        <button id="btn-reset-game" class="bg-slate-200 hover:bg-slate-300 active:scale-95 text-slate-700 font-bold px-4 py-3 rounded-2xl border border-slate-300 flex items-center gap-1.5 text-sm md:text-base">
+          <i data-lucide="trash-2" class="w-5 h-5"></i>
+          <span>さいしょから</span>
+        </button>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- フッター -->
+  <footer class="bg-amber-100/60 border-t-2 border-amber-200 py-2 text-center text-xs font-bold text-slate-500">
+    知的障害特別支援学校小学部 国語科 まねっこあそび
+  </footer>
+
+  <!-- ==================== QRコード接続モーダル ==================== -->
+  <div id="modal-qr" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-3xl p-6 max-w-sm w-full flex flex-col items-center text-center shadow-2xl border-4 border-amber-300 space-y-4">
+      <div class="flex items-center justify-between w-full">
+        <h3 class="text-xl font-black text-slate-800">iPadをつなぐ QRコード</h3>
+        <button id="btn-close-qr" class="text-slate-400 hover:text-slate-600 p-1">
+          <i data-lucide="x" class="w-6 h-6"></i>
+        </button>
+      </div>
+      <p class="text-xs text-slate-600 font-bold">
+        iPadのカメラで 読み取ると すぐにアプリが ひらきます
+      </p>
+      <!-- QRコード描画エリア -->
+      <div id="qrcode-container" class="p-3 bg-white border-2 border-amber-200 rounded-2xl shadow-inner"></div>
+      <div class="w-full bg-slate-100 p-2.5 rounded-xl text-xs font-mono text-slate-700 break-all" id="qr-url-text">
+        http://...
+      </div>
+      <button id="btn-close-qr-2" class="w-full bg-amber-400 hover:bg-amber-500 text-white font-black py-2.5 rounded-xl">
+        とじる
+      </button>
+    </div>
+  </div>
+
+  <!-- アプリケーションスクリプト -->
+  <script src="app.js"></script>
+</body>
+</html>
